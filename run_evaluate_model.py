@@ -120,7 +120,7 @@ def evaluate_result_regular(datapath, model_name, X_train, src_vocab_size, y_tra
     elif model_name == 'Test1_CNN':
         print('Evaluate Performance: {}'.format(model_name))
         max_seq_lens = max_len
-        model = CNN_Transformer_Allchr(src_vocab_size, max_seq_lens, tuning_params=best_params).to(device)
+        model = CNN_Transformer_Allchr(device, src_vocab_size, max_seq_lens, tuning_params=best_params).to(device)
     elif model_name == 'Test1_Transformer':
         print('Evaluate Performance: {}'.format(model_name))
         max_seq_lens = best_params['max_seq_len']
@@ -153,9 +153,9 @@ def evaluate_result_regular(datapath, model_name, X_train, src_vocab_size, y_tra
     # training loop over epochs
     for epoch in range(num_epochs):
         if epoch < 1:
-            with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA], record_shapes=True, profile_memory=True, with_flops=True) as prof:
+            with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA], record_shapes=True, profile_memory=True, with_flops=True, use_cuda=True) as prof:
                 train_one_epoch(model, train_loader, loss_function, optimizer, device)
-            print(prof.key_averages().table(row_limit=5))
+            print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=5))
         else:
             train_one_epoch(model, train_loader, loss_function, optimizer, device)
 
@@ -163,11 +163,11 @@ def evaluate_result_regular(datapath, model_name, X_train, src_vocab_size, y_tra
             # scheduler.step()
     
     # predict result test
-    with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA], record_shapes=True, profile_memory=True, with_flops=True) as prof:
+    with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA], record_shapes=True, profile_memory=True, with_flops=True, use_cuda=True) as prof:
         y_pred = predict(model, test_loader, device)
     
     # print profiled data
-    print(prof.key_averages().table(row_limit=5))
+    print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=5))
 
     # convert the predicted y values
     y_pred = minmax_scaler.inverse_transform(y_pred)
