@@ -1,0 +1,1 @@
+{'learning_rate': 1e-05, 'weight_decay': 0.0001305721444536157, 'lr_decay': 0.96, 'activation': 'GELU', 'early_stop': 20, 'num_mixer_layers': 2, 'embedding_dim': 96, 'token_mixing_mlp_factor': 0.30000000000000004, 'feature_mixing_mlp_factor': 23.0, 'dropout2': 0.15000000000000002, 'dropout': 0.5, 'avg_epochs': 93}

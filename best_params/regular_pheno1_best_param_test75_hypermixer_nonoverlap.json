@@ -1,0 +1,1 @@
+{'learning_rate': 0.001, 'weight_decay': 0.00633969201520968, 'activation': 'Tanh', 'early_stop': 20, 'num_mixer_layers': 7, 'embedding_dim': 96, 'hyper_mixing_mlp_factor': 0.7000000000000001, 'feature_mixing_mlp_factor': 21.0, 'dropout2': 0.35, 'dropout': 0.25, 'avg_epochs': 58}

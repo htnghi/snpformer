@@ -1,0 +1,19 @@
+# ds_store files
+.DS_Store
+
+# data folder
+data/
+bin/
+lib/
+include/
+share/
+
+# py venv
+pyvenv.cfg
+
+# py_cache and checkpoints folders
+.ipynb_checkpoints/
+__pycache__/
+
+# tokenizer files
+tokenizer_*.json
