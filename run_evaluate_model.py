@@ -153,17 +153,14 @@ def evaluate_result_regular(datapath, model_name, X_train, src_vocab_size, y_tra
     # training loop over epochs
     for epoch in range(num_epochs):
         if epoch < 1:
-            with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA], record_shapes=True, profile_memory=True, with_flops=True, use_cuda=True) as prof:
+            with profile(activities=[ProfilerActivity.CUDA], record_shapes=True, profile_memory=True, with_flops=True) as prof:
                 train_one_epoch(model, train_loader, loss_function, optimizer, device)
             print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=5))
         else:
             train_one_epoch(model, train_loader, loss_function, optimizer, device)
-
-            # step the scheduler to adjust the learning rate
-            # scheduler.step()
     
     # predict result test
-    with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA], record_shapes=True, profile_memory=True, with_flops=True, use_cuda=True) as prof:
+    with profile(activities=[ProfilerActivity.CUDA], record_shapes=True, profile_memory=True, with_flops=True) as prof:
         y_pred = predict(model, test_loader, device)
     
     # print profiled data
