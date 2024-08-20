@@ -148,8 +148,7 @@ class ChannelMixing(nn.Module):
         super(ChannelMixing, self).__init__()
 
         hidden_dim_feature_mixing = int(channels * feature_mixing_factor)
-        # self.layer_norm = nn.LayerNorm([num_patches, channels])
-        self.layer_norm = nn.LayerNorm(channels)
+        self.layer_norm = nn.LayerNorm([num_patches, channels])
         self.mlp = MLP(channels, hidden_dim_feature_mixing, tuning_params)
 
     def forward(self, x):
@@ -170,22 +169,19 @@ class Mixer(nn.Module):
         super(Mixer, self).__init__()
 
         hidden_dim_hyper_mixing = int(num_patches * tuning_params['hyper_mixing_mlp_factor'])
-        # self.layer_norm = nn.LayerNorm([num_patches, channels])
-        self.layer_norm = nn.LayerNorm(channels)
-        self.hyper_mixing_out = hypermixing.HyperMixing(input_output_dim=channels, hypernet_size=hidden_dim_hyper_mixing, max_length=maxlen, num_heads=tuning_params['num_heads'], hypernetwork_bias=True)
+        self.hyper_mixing_out = hypermixing.HyperMixing(input_output_dim=channels, hypernet_size=hidden_dim_hyper_mixing, max_length=maxlen)
         self.channel_mixing = ChannelMixing(num_patches, channels, tuning_params['feature_mixing_mlp_factor'], tuning_params)
-        self.dropout = nn.Dropout(tuning_params['dropout2'])
 
     def forward(self, x, mask):
         # print('Shape of x before Token mixing',  x.shape) #torch.Size([32, 4, 64])
-        x_norm = self.layer_norm(x)
+
         # Token Mixing
         # print('Call TokenMixing in Mixer')
-        hyper_mixing_out = self.hyper_mixing_out(x_norm, x_norm, x_norm, mask, mask)
+        hyper_mixing_out = self.hyper_mixing_out(x, x, x, mask, mask)
         # print('Out hyper mixing in Mixer', hyper_mixing_out.shape) #torch.Size([32, 64, 4])
-
+        
         # Skip connection
-        x = x + self.dropout(hyper_mixing_out)  #torch.Size([32, 4, 64])
+        x = x + hyper_mixing_out  #torch.Size([32, 4, 64])
 
         # print('Call ChannelMixing in Mixer')
         # Channel Mixing
@@ -204,7 +200,6 @@ class Mixer_each_chr(nn.Module):
             for _ in range(tuning_params['num_mixer_layers'])
         ])
         self.layer_norm = nn.LayerNorm(tuning_params['embedding_dim'])
-        # self.layer_norm = nn.LayerNorm([num_patches, tuning_params['embedding_dim']])
 
     def forward(self, x, mask):
         
@@ -234,7 +229,7 @@ class MixerModel(nn.Module):
         
 
         self.global_avg_pool = nn.AdaptiveAvgPool1d(output_size=1)
-        self.dropout = Dropout(tuning_params['dropout'])
+        self.dropout = Dropout(tuning_params['dropout2'])
         self.fc = nn.Linear(in_features=tuning_params['embedding_dim'], out_features=1)
         self.act = get_activation_func(tuning_params['activation'])
 
@@ -297,8 +292,7 @@ def train_one_epoch(model, train_loader, loss_function, optimizer, device):
     model.train()
     
     # iterate through the train loader
-    for i, (inputs, targets) in enumerate(train_loader):       
-
+    for i, (inputs, targets) in enumerate(train_loader):
         inputs  = [in_data.to(device) for in_data in inputs]
         targets = targets.to(device)
 
@@ -428,7 +422,7 @@ def train_val_loop(model, training_params, tuning_params, X_train_list, y_train,
             model = best_model
             y_pred = predict(model, val_loader, device)
             return y_pred, early_stopping_point
-        
+    
     # return the best predicted values
     y_pred = predict(best_model, val_loader, device)
     return y_pred, early_stopping_point
@@ -440,7 +434,7 @@ def objective(trial, list_X_train, src_vocab_size, y, data_variants, training_pa
 
     # for tuning parameters
     tuning_params_dict = {
-        'learning_rate': trial.suggest_categorical('learning_rate', [5e-6, 1e-6, 5e-5, 1e-5, 5e-4, 1e-4, 1e-3, 1e-2]), 
+        'learning_rate': trial.suggest_categorical('learning_rate', [1e-5, 1e-4, 1e-3, 1e-2, 1e-1]), 
         # 'weight_decay': trial.suggest_categorical('weight_decay', [1e-6, 1e-5, 1e-4, 1e-3, 1e-2]),
         'weight_decay': trial.suggest_float('weight_decay', 1e-8, 1e-2),
         # 'lr_decay': trial.suggest_float('lr_decay', 0.95, 0.99, step=0.01),
@@ -448,11 +442,10 @@ def objective(trial, list_X_train, src_vocab_size, y, data_variants, training_pa
         'activation': trial.suggest_categorical('activation', ['LeakyReLU', 'ReLU', 'Tanh', 'GELU']),
         'early_stop': trial.suggest_int("early_stop", 5, 20, step=5),
 
-        'num_mixer_layers': trial.suggest_int("num_mixer_layers", 2, 8, step=1),
-        'embedding_dim': trial.suggest_int("embedding_dim", 40, 128, step=4),
-        'hyper_mixing_mlp_factor': trial.suggest_float('hyper_mixing_mlp_factor', 0.1, 0.8, step=0.1),
-        'feature_mixing_mlp_factor': trial.suggest_float('feature_mixing_mlp_factor', 5, 20, step=1),
-        'num_heads': trial.suggest_categorical("num_heads", [1, 2, 4]),
+        'num_mixer_layers': trial.suggest_int("num_mixer_layers", 2, 6, step=1),
+        'embedding_dim': trial.suggest_int("embedding_dim", 40, 256, step=4),
+        'hyper_mixing_mlp_factor': trial.suggest_float('hyper_mixing_mlp_factor', 0.1, 0.8, step=0.05),
+        'feature_mixing_mlp_factor': trial.suggest_float('feature_mixing_mlp_factor', 5, 20, step=0.5),
 
         # 'pca': trial.suggest_float('pca', 0.85, 0.95, step=0.05),
         'dropout2': trial.suggest_float('dropout2', 0.1, 0.5, step=0.05),
@@ -509,11 +502,11 @@ def objective(trial, list_X_train, src_vocab_size, y, data_variants, training_pa
         max_seq_lens = []
         for i in range(len(X_train_list)):
             max_seq_lens.append(X_train_list[i].shape[1])
-        
+
         set_seeds(seed=int(42+fold))
         try:
             model = MixerModel(src_vocab_size, max_seq_lens, tuning_params=tuning_params_dict).to(device)
-            
+
         except Exception as err:
             print('Trial failed. Error in model creation, {}'.format(err))
             raise optuna.exceptions.TrialPruned()
