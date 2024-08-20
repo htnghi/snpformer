@@ -13,6 +13,7 @@ from sklearn.model_selection import KFold
 
 from torch.optim import SGD, Adam
 from torch.profiler import profile, record_function, ProfilerActivity
+from fvcore.nn import FlopCountAnalysis, parameter_count_table
 from torch.utils.data import DataLoader, Dataset
 
 from model.transformer_allchr import EnsembledModel as Transformer_Allchr
@@ -81,6 +82,9 @@ def predict(model, val_loader, device):
         ret_output = predictions.cpu().detach().numpy()
     
     return ret_output
+
+def count_parameters(model):
+    return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
 def evaluate_result_regular(datapath, model_name, X_train, src_vocab_size, y_train, X_test, y_test, best_params, data_variants, device):
     # set seeds for reproducibility
@@ -153,18 +157,33 @@ def evaluate_result_regular(datapath, model_name, X_train, src_vocab_size, y_tra
     # training loop over epochs
     for epoch in range(num_epochs):
         if epoch < 1:
-            with profile(activities=[ProfilerActivity.CUDA], record_shapes=True, profile_memory=True, with_flops=True) as prof:
+            with profile(activities=[ProfilerActivity.CPU], record_shapes=True, profile_memory=True, with_flops=True) as prof:
                 train_one_epoch(model, train_loader, loss_function, optimizer, device)
+            print("Training Profile:")
             print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=5))
         else:
             train_one_epoch(model, train_loader, loss_function, optimizer, device)
     
     # predict result test
-    with profile(activities=[ProfilerActivity.CUDA], record_shapes=True, profile_memory=True, with_flops=True) as prof:
+    with profile(activities=[ProfilerActivity.CPU], record_shapes=True, profile_memory=True, with_flops=True) as prof:
         y_pred = predict(model, test_loader, device)
     
     # print profiled data
+    print("Prediction Profile:")
     print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=5))
+
+    # Calculating the number of parameters
+    num_params = count_parameters(model)
+    print(f"Number of parameters: {num_params}")
+    
+    # Calculating FLOPs using fvcore
+    inputs = next(iter(train_loader))[0].to(device)
+    flops = FlopCountAnalysis(model, inputs)
+    print(f"FLOPs: {flops.total()}")
+
+    # Printing detailed parameter count table
+    print("Parameter Count Table:")
+    print(parameter_count_table(model))
 
     # convert the predicted y values
     y_pred = minmax_scaler.inverse_transform(y_pred)
@@ -310,7 +329,7 @@ if __name__ == '__main__':
 
         if embedding_type == 'kmer_nonoverlap':
             print('Embedding: {} | kmer={}'.format(embedding_type, kmer))
-            X_kmer = seqs2kmer_overlap(X_train, kmer=kmer)
+            X_kmer = seqs2kmer_nonoverlap(X_train, kmer=kmer)
             X_tokenizer = load_kmer_tokenizer(kmer=kmer)
             X_test_kmer = seqs2kmer_nonoverlap(X_test, kmer=kmer)
             x_maxlen = find_max_kmer_length(X_kmer, X_tokenizer) #401
