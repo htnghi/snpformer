@@ -2,6 +2,8 @@ import json
 import sklearn
 import argparse
 import numpy as np
+import warnings
+import time
 
 from preprocess.snp_splitting import *
 from preprocess.snp_tokenize import *
@@ -33,6 +35,9 @@ from model.transformer_infinite_splitchr import EnsembledModel as Transformer_In
 
 from model.word2vec_transformer_splitchr import EnsembledModel as Transformer_W2V_Splitchr
 from model.word2vec_hyper_mixer_splitchr import MixerModel as HyperMixer_W2V_Splitchr
+
+# Suppress specific warnings
+warnings.filterwarnings("ignore")
 
 
 def preprocess_mimax_scaler(y_train, y_val):
@@ -85,6 +90,12 @@ def predict(model, val_loader, device):
 
 def count_parameters(model):
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
+
+def log_gpu_memory():
+    allocated = torch.cuda.memory_allocated() / (1024 ** 2)  # Convert bytes to MB
+    reserved = torch.cuda.memory_reserved() / (1024 ** 2)  # Convert bytes to MB
+    print(f"GPU Memory Allocated: {allocated:.2f} MB")
+    print(f"GPU Memory Reserved: {reserved:.2f} MB")
 
 def evaluate_result_regular(datapath, model_name, X_train, src_vocab_size, y_train, X_test, y_test, best_params, data_variants, device):
     # set seeds for reproducibility
@@ -154,15 +165,27 @@ def evaluate_result_regular(datapath, model_name, X_train, src_vocab_size, y_tra
     optimizer = torch.optim.Adam(params=model.parameters(), lr=learning_rate, weight_decay=momentum)
     # scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=best_params['lr_decay'])
 
+    total_time = 0  # Initialize total time
+
     # training loop over epochs
     for epoch in range(num_epochs):
+        start_time = time.time()  # Start timer
         if epoch < 1:
             with profile(activities=[ProfilerActivity.CUDA], record_shapes=True, profile_memory=True, with_flops=True) as prof:
                 train_one_epoch(model, train_loader, loss_function, optimizer, device)
             print("Training Profile:")
             print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=5))
+            log_gpu_memory()
         else:
             train_one_epoch(model, train_loader, loss_function, optimizer, device)
+        
+        epoch_time = time.time() - start_time  # End timer
+        total_time += epoch_time  # Accumulate total time
+        # print(f"Epoch {epoch+1} took {epoch_time:.2f} seconds")
+    
+    # Calculate the average time per epoch
+    average_time = total_time / num_epochs
+    print(f"Average time per epoch: {average_time:.2f} seconds")
     
     # predict result test
     with profile(activities=[ProfilerActivity.CUDA], record_shapes=True, profile_memory=True, with_flops=True) as prof:
@@ -171,6 +194,7 @@ def evaluate_result_regular(datapath, model_name, X_train, src_vocab_size, y_tra
     # print profiled data
     print("Prediction Profile:")
     print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=5))
+    log_gpu_memory()
 
     # Calculating the number of parameters
     num_params = count_parameters(model)
