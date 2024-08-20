@@ -15,7 +15,7 @@ from sklearn.model_selection import KFold
 
 from torch.optim import SGD, Adam
 from torch.profiler import profile, record_function, ProfilerActivity
-from torchinfo import summary
+# from torchinfo import summary
 from fvcore.nn import FlopCountAnalysis, parameter_count_table
 # from torch.utils.flop_counter import FlopCounterMode
 from torch.utils.data import DataLoader, Dataset
