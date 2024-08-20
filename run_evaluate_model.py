@@ -123,6 +123,26 @@ def predict(model, val_loader, device):
     
     return ret_output
 
+def predict_splitchr(model, val_loader, device):
+    model.eval()
+    predictions = None
+    with torch.no_grad():
+        for i, (inputs, targets) in enumerate(val_loader):
+            inputs  = [in_data.to(device) for in_data in inputs]
+            targets = targets.to(device)
+            outputs = model(inputs)
+
+            # concatenate the predictions
+            predictions = torch.clone(outputs) if predictions is None else torch.cat((predictions, outputs))
+
+    # convert predictions to numpy array based on device
+    if device == torch.device('cpu'):
+        ret_output = predictions.detach().numpy()
+    else:
+        ret_output = predictions.cpu().detach().numpy()
+    
+    return ret_output
+
 def count_all_parameters(model):
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
@@ -369,7 +389,7 @@ def evaluate_result_splitchr(datapath, model_name, list_X_train, src_vocab_size,
             print('1. Log memory usage for one epoch:')
             log_gpu_memory()
         else:
-            train_one_epoch(model, train_loader, loss_function, optimizer, device)
+            train_one_epoch_splitchr(model, train_loader, loss_function, optimizer, device)
         
         epoch_time = time.time() - start_time  # End timer
         total_time += epoch_time  # Accumulate total time
@@ -393,7 +413,7 @@ def evaluate_result_splitchr(datapath, model_name, list_X_train, src_vocab_size,
     # with profile(activities=[ProfilerActivity.CUDA], record_shapes=True, profile_memory=True) as prof:
     # print("Prediction Profile:")
     # print(prof.key_averages().table(sort_by="cpu_memory_usage", row_limit=5))
-    y_pred = predict(model, test_loader, device)
+    y_pred = predict_splitchr(model, test_loader, device)
     print('Log memory usage for predict:')
     log_gpu_memory()
 
