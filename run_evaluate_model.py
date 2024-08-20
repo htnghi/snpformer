@@ -171,10 +171,11 @@ def evaluate_result_regular(datapath, model_name, X_train, src_vocab_size, y_tra
     for epoch in range(num_epochs):
         start_time = time.time()  # Start timer
         if epoch < 1:
-            with profile(activities=[ProfilerActivity.CUDA], record_shapes=True, profile_memory=True, with_flops=True) as prof:
-                train_one_epoch(model, train_loader, loss_function, optimizer, device)
-            print("Training Profile:")
-            print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=5))
+            # with profile(activities=[ProfilerActivity.CUDA], record_shapes=True, profile_memory=True) as prof:
+            #     train_one_epoch(model, train_loader, loss_function, optimizer, device)
+            # print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=5))
+            train_one_epoch(model, train_loader, loss_function, optimizer, device)
+            print('Log memory usage for one epoch:')
             log_gpu_memory()
         else:
             train_one_epoch(model, train_loader, loss_function, optimizer, device)
@@ -188,12 +189,11 @@ def evaluate_result_regular(datapath, model_name, X_train, src_vocab_size, y_tra
     print(f"Average time per epoch: {average_time:.2f} seconds")
     
     # predict result test
-    with profile(activities=[ProfilerActivity.CUDA], record_shapes=True, profile_memory=True, with_flops=True) as prof:
-        y_pred = predict(model, test_loader, device)
-    
-    # print profiled data
-    print("Prediction Profile:")
-    print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=5))
+    # with profile(activities=[ProfilerActivity.CUDA], record_shapes=True, profile_memory=True) as prof:
+    # print("Prediction Profile:")
+    # print(prof.key_averages().table(sort_by="cpu_memory_usage", row_limit=5))
+    y_pred = predict(model, test_loader, device)
+    print('Log memory usage for predict:')
     log_gpu_memory()
 
     # Calculating the number of parameters
