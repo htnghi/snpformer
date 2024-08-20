@@ -15,7 +15,9 @@ from sklearn.model_selection import KFold
 
 from torch.optim import SGD, Adam
 from torch.profiler import profile, record_function, ProfilerActivity
+from torchinfo import summary
 from fvcore.nn import FlopCountAnalysis, parameter_count_table
+# from torch.utils.flop_counter import FlopCounterMode
 from torch.utils.data import DataLoader, Dataset
 
 from model.transformer_allchr import EnsembledModel as Transformer_Allchr
@@ -39,6 +41,17 @@ from model.word2vec_hyper_mixer_splitchr import MixerModel as HyperMixer_W2V_Spl
 # Suppress specific warnings
 warnings.filterwarnings("ignore")
 
+class ListTensorDataset(Dataset):
+    def __init__(self, X_list, y_train):
+        self.X_list = X_list
+        self.y_train = y_train
+
+    def __len__(self):
+        return len(self.y_train)
+
+    def __getitem__(self, idx):
+        # return a list containing all tensors in the batch and the corresponding label
+        return [X[idx] for X in self.X_list], self.y_train[idx]
 
 def preprocess_mimax_scaler(y_train, y_val):
     minmax_scaler = MinMaxScaler()
@@ -88,8 +101,11 @@ def predict(model, val_loader, device):
     
     return ret_output
 
-def count_parameters(model):
+def count_all_parameters(model):
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
+
+def count_trainabled_parameters(model):
+    return sum(p.numel() for p in model.parameters())
 
 def log_gpu_memory():
     allocated = torch.cuda.memory_allocated() / (1024 ** 2)  # Convert bytes to MB
@@ -165,8 +181,11 @@ def evaluate_result_regular(datapath, model_name, X_train, src_vocab_size, y_tra
     optimizer = torch.optim.Adam(params=model.parameters(), lr=learning_rate, weight_decay=momentum)
     # scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=best_params['lr_decay'])
 
-    total_time = 0  # Initialize total time
+    # Clear cache and reset peak memory stats before the forward pass
+    torch.cuda.empty_cache()
+    torch.cuda.reset_peak_memory_stats(device)
 
+    total_time = 0  # Initialize total time
     # training loop over epochs
     for epoch in range(num_epochs):
         start_time = time.time()  # Start timer
@@ -175,7 +194,7 @@ def evaluate_result_regular(datapath, model_name, X_train, src_vocab_size, y_tra
             #     train_one_epoch(model, train_loader, loss_function, optimizer, device)
             # print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=5))
             train_one_epoch(model, train_loader, loss_function, optimizer, device)
-            print('Log memory usage for one epoch:')
+            print('1. Log memory usage for one epoch:')
             log_gpu_memory()
         else:
             train_one_epoch(model, train_loader, loss_function, optimizer, device)
@@ -186,8 +205,32 @@ def evaluate_result_regular(datapath, model_name, X_train, src_vocab_size, y_tra
     
     # Calculate the average time per epoch
     average_time = total_time / num_epochs
-    print(f"Average time per epoch: {average_time:.2f} seconds")
+    print(f"2. Average time per epoch: {average_time:.2f} seconds")
     
+    # Calculating the number of parameters
+    num_all_params = count_all_parameters(model)
+    num_trainabled_params = count_trainabled_parameters(model)
+    print(f"3.1. Number of all parameters: {num_all_params}")
+    print(f"3.2. Number of only num_trainabled_params parameters: {num_trainabled_params}")
+    
+    # Calculating FLOPs using fvcore
+    # inputs = next(iter(train_loader))[0].to(device)
+    # flops = FlopCountAnalysis(model, inputs)
+    # print(f"FLOPs: {flops.total()}")
+
+    # inputs = next(iter(train_loader))[0].to(device) # Fetch a sample input from your DataLoader
+    # model = model.to(device)
+    # # Use FlopCounterMode to calculate FLOPs
+    # with FlopCounterMode(model) as flops_mode:
+    #     _ = model(inputs)  # Perform a forward pass
+    #     flops = flops_mode.get_total_flops()
+    # print(f"Floating point per second FLOPs: {flops}")
+
+    # Printing detailed parameter count table
+    print("Parameter Count Table:")
+    print(parameter_count_table(model))
+
+
     # predict result test
     # with profile(activities=[ProfilerActivity.CUDA], record_shapes=True, profile_memory=True) as prof:
     # print("Prediction Profile:")
@@ -196,18 +239,141 @@ def evaluate_result_regular(datapath, model_name, X_train, src_vocab_size, y_tra
     print('Log memory usage for predict:')
     log_gpu_memory()
 
-    # Calculating the number of parameters
-    num_params = count_parameters(model)
-    print(f"Number of parameters: {num_params}")
+    # convert the predicted y values
+    y_pred = minmax_scaler.inverse_transform(y_pred)
+
+    # collect mse, r2, explained variance
+    test_mse = sklearn.metrics.mean_squared_error(y_true=y_test, y_pred=y_pred)
+    test_exp_variance = sklearn.metrics.explained_variance_score(y_true=y_test, y_pred=y_pred)
+    test_r2 = sklearn.metrics.r2_score(y_true=y_test, y_pred=y_pred)
+    test_mae = sklearn.metrics.mean_absolute_error(y_true=y_test, y_pred=y_pred)
+
+    print('--------------------------------------------------------------')
+    print('Test Transformer results: avg_loss={:.4f}, avg_expvar={:.4f}, avg_r2score={:.4f}, avg_mae={:.4f}'.format(test_mse, test_exp_variance, test_r2, test_mae))
+    print('--------------------------------------------------------------')
+
+    return test_exp_variance
+
+def evaluate_result_splitchr(datapath, model_name, list_X_train, src_vocab_size, y_train, list_X_test, y_test, best_params, data_variants, device):
+    # set seeds for reproducibility
+    set_seeds()
     
-    # Calculating FLOPs using fvcore
-    inputs = next(iter(train_loader))[0].to(device)
-    flops = FlopCountAnalysis(model, inputs)
-    print(f"FLOPs: {flops.total()}")
+    # for tracking the tuning information
+    minmax = '_minmax' if data_variants[0] == True else ''
+    # standard = '_standard' if data_variants[1] == True else ''
+    # pcafitting = '_pca' if data_variants[2] == True else ''
+    # pheno = str(data_variants[3])
+
+    # extract preprocessed data variants for tuning
+    minmax_scaler_mode = data_variants[0]
+    # standard_scaler_mode = data_variants[1]
+    # pca_fitting_mode = data_variants[2]
+
+    # preprocessing data
+    if minmax_scaler_mode == 1: # minmax scaler
+        y_train_scale, y_test_scale, minmax_scaler = preprocess_mimax_scaler(y_train, y_test)
+    # if standard_scaler_mode == 1: # standard scaler
+    #     X_train, X_test = preprocess_standard_scaler(X_train, X_test)
+    # if pca_fitting_mode == 1: # pca fitting
+    #     X_train, X_test = decomposition_PCA(X_train, X_test, best_params['pca'])
+
+    # extract training and tuned parameters
+    batch_size = 32
+    num_epochs = best_params['avg_epochs']
+    learning_rate = best_params['learning_rate']
+    momentum = best_params['weight_decay']
+    # get the max sequence length of each chrobosome
+    max_len = []
+    for i in range(len(list_X_train)):
+        max_len.append(list_X_train[i].shape[1])
+   
+    # create model
+    if model_name == 'MLPMixer':
+        print('Evaluate Performance: {}'.format(model_name))
+        max_seq_lens = max_len
+        model = MLPMixer_Splitchr(src_vocab_size, max_seq_lens, tuning_params=best_params).to(device)
+    elif model_name == 'Test1_CNN':
+        print('Evaluate Performance: {}'.format(model_name))
+        max_seq_lens = max_len
+        model = CNN_Transformer_Splitchr(device, src_vocab_size, max_seq_lens, tuning_params=best_params).to(device)
+    elif model_name == 'Transformer':
+        print('Evaluate Performance: {}'.format(model_name))
+        max_seq_lens = int(512)
+        model = Transformer_Splitchr(device, src_vocab_size, max_len, max_seq_lens, tuning_params=best_params).to(device)
+    elif model_name == 'Test2_Infinite_Transformer':
+        print('Evaluate Performance: {}'.format(model_name))
+        max_seq_lens = max_len
+        model = Transformer_Inf_Splitchr(device, src_vocab_size, max_seq_lens, tuning_params=best_params).to(device)
+    else:
+        print('Evaluate Performance: {}'.format(model_name))
+        max_seq_lens = max_len
+        model = HyperMixer_Splitchr(src_vocab_size, max_seq_lens, tuning_params=best_params).to(device)
+
+    # transform data to tensor format
+    list_tensor_X_train = [torch.from_numpy(item).long() for item in list_X_train]
+    list_tensor_X_test = [torch.from_numpy(item).long() for item in list_X_test]
+    tensor_y_train = torch.Tensor(y_train_scale)
+    tensor_y_test = torch.Tensor(y_test_scale)
+
+    # squeeze y for training Transformer to tensor
+    tensor_y_train, tensor_y_test = tensor_y_train.view(len(y_train_scale),1), tensor_y_test.view(len(y_test_scale),1)
+
+    # create the list dataset
+    train_dataset = ListTensorDataset(list_tensor_X_train, tensor_y_train)
+    test_dataset   = ListTensorDataset(list_tensor_X_test, tensor_y_test)
+
+    # define data loaders for training and testing data
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+    test_loader   = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
+
+    # define loss function and optimizer
+    loss_function = torch.nn.MSELoss()
+    optimizer = torch.optim.Adam(params=model.parameters(), lr=learning_rate, weight_decay=momentum)
+    # scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=best_params['lr_decay'])
+
+    # Clear cache and reset peak memory stats before the forward pass
+    torch.cuda.empty_cache()
+    torch.cuda.reset_peak_memory_stats(device)
+
+    total_time = 0  # Initialize total time
+    # training loop over epochs
+    for epoch in range(num_epochs):
+        start_time = time.time()  # Start timer
+        if epoch < 1:
+            # with profile(activities=[ProfilerActivity.CUDA], record_shapes=True, profile_memory=True) as prof:
+            #     train_one_epoch(model, train_loader, loss_function, optimizer, device)
+            # print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=5))
+            train_one_epoch(model, train_loader, loss_function, optimizer, device)
+            print('1. Log memory usage for one epoch:')
+            log_gpu_memory()
+        else:
+            train_one_epoch(model, train_loader, loss_function, optimizer, device)
+        
+        epoch_time = time.time() - start_time  # End timer
+        total_time += epoch_time  # Accumulate total time
+        # print(f"Epoch {epoch+1} took {epoch_time:.2f} seconds")
+    
+    # Calculate the average time per epoch
+    average_time = total_time / num_epochs
+    print(f"2. Average time per epoch: {average_time:.2f} seconds")
+    
+    # Calculating the number of parameters
+    num_all_params = count_all_parameters(model)
+    num_trainabled_params = count_trainabled_parameters(model)
+    print(f"3.1. Number of all parameters: {num_all_params}")
+    print(f"3.2. Number of only num_trainabled_params parameters: {num_trainabled_params}")
 
     # Printing detailed parameter count table
     print("Parameter Count Table:")
     print(parameter_count_table(model))
+
+    # predict result test
+    # with profile(activities=[ProfilerActivity.CUDA], record_shapes=True, profile_memory=True) as prof:
+    # print("Prediction Profile:")
+    # print(prof.key_averages().table(sort_by="cpu_memory_usage", row_limit=5))
+    y_pred = predict(model, test_loader, device)
+    print('Log memory usage for predict:')
+    log_gpu_memory()
 
     # convert the predicted y values
     y_pred = minmax_scaler.inverse_transform(y_pred)
@@ -345,6 +511,116 @@ if __name__ == '__main__':
     print('----------------------------------------------------')
     if model_type == 'Chromosomesplit':
         print('Type: Chromosomesplit')
+        if dataset == 4:
+            X_chr1_train, X_chr2_train, X_chr3_train, X_chr4_train, X_chr5_train = split_into_chromosome_train_realworld(datapath, dataset, ratio)
+            X_chr1_test, X_chr2_test, X_chr3_test, X_chr4_test, X_chr5_test = split_into_chromosome_test_realworld(datapath, dataset, ratio)
+            y_train, y_test= load_split_y_data(datapath, dataset, ratio)
+        else:
+            X_chr1_train, X_chr2_train, X_chr3_train, X_chr4_train, X_chr5_train = split_into_chromosome_train(datapath, dataset, ratio)
+            X_chr1_test, X_chr2_test, X_chr3_test, X_chr4_test, X_chr5_test = split_into_chromosome_test(datapath, dataset, ratio)
+            y_train, y_test= load_split_y_data(datapath, dataset, ratio)
+
+        if embedding_type == 'kmer_nonoverlap':
+            print('Embedding: {} | kmer={}'.format(embedding_type, kmer))
+
+            X_chr1_kmer = seqs2kmer_nonoverlap(X_chr1_train, kmer=kmer)
+            X_chr2_kmer = seqs2kmer_nonoverlap(X_chr2_train, kmer=kmer)
+            X_chr3_kmer = seqs2kmer_nonoverlap(X_chr3_train, kmer=kmer)
+            X_chr4_kmer = seqs2kmer_nonoverlap(X_chr4_train, kmer=kmer)
+            X_chr5_kmer = seqs2kmer_nonoverlap(X_chr5_train, kmer=kmer)
+
+            X_chr1_tokenizer = load_kmer_tokenizer(kmer=kmer)
+
+            X_test_chr1_kmer = seqs2kmer_nonoverlap(X_chr1_test, kmer=kmer)
+            X_test_chr2_kmer = seqs2kmer_nonoverlap(X_chr2_test, kmer=kmer)
+            X_test_chr3_kmer = seqs2kmer_nonoverlap(X_chr3_test, kmer=kmer)
+            X_test_chr4_kmer = seqs2kmer_nonoverlap(X_chr4_test, kmer=kmer)
+            X_test_chr5_kmer = seqs2kmer_nonoverlap(X_chr5_test, kmer=kmer)
+
+            x1_maxlen = find_max_kmer_length(X_chr1_kmer, X_chr1_tokenizer) #401
+            x2_maxlen = find_max_kmer_length(X_chr2_kmer, X_chr1_tokenizer) #283
+            x3_maxlen = find_max_kmer_length(X_chr3_kmer, X_chr1_tokenizer) #336
+            x4_maxlen = find_max_kmer_length(X_chr4_kmer, X_chr1_tokenizer) #288
+            x5_maxlen = find_max_kmer_length(X_chr5_kmer, X_chr1_tokenizer) #361
+
+
+            embedded_X_chr1 = np.array(encode_sequences(X_chr1_kmer, X_chr1_tokenizer, max_length=x1_maxlen))
+            embedded_X_chr2 = np.array(encode_sequences(X_chr2_kmer, X_chr1_tokenizer, max_length=x2_maxlen))
+            embedded_X_chr3 = np.array(encode_sequences(X_chr3_kmer, X_chr1_tokenizer, max_length=x3_maxlen))
+            embedded_X_chr4 = np.array(encode_sequences(X_chr4_kmer, X_chr1_tokenizer, max_length=x4_maxlen))
+            embedded_X_chr5 = np.array(encode_sequences(X_chr5_kmer, X_chr1_tokenizer, max_length=x5_maxlen))
+            embedded_X_test_chr1 = np.array(encode_sequences(X_test_chr1_kmer, X_chr1_tokenizer, max_length=x1_maxlen))
+            embedded_X_test_chr2 = np.array(encode_sequences(X_test_chr2_kmer, X_chr1_tokenizer, max_length=x2_maxlen))
+            embedded_X_test_chr3 = np.array(encode_sequences(X_test_chr3_kmer, X_chr1_tokenizer, max_length=x3_maxlen))
+            embedded_X_test_chr4 = np.array(encode_sequences(X_test_chr4_kmer, X_chr1_tokenizer, max_length=x4_maxlen))
+            embedded_X_test_chr5 = np.array(encode_sequences(X_test_chr5_kmer, X_chr1_tokenizer, max_length=x5_maxlen))
+
+            list_X_train = [embedded_X_chr1, embedded_X_chr2, embedded_X_chr3, embedded_X_chr4, embedded_X_chr5]
+            list_X_test = [embedded_X_test_chr1, embedded_X_test_chr2, embedded_X_test_chr3, embedded_X_test_chr4, embedded_X_test_chr5]
+
+            src_vocab_size = len(X_chr1_tokenizer)
+
+        elif embedding_type == 'kmer_overlap':
+            print('Embedding: {} | kmer={}'.format(embedding_type, kmer))
+
+            X_chr1_kmer = seqs2kmer_overlap(X_chr1_train, kmer=kmer)
+            X_chr2_kmer = seqs2kmer_overlap(X_chr2_train, kmer=kmer)
+            X_chr3_kmer = seqs2kmer_overlap(X_chr3_train, kmer=kmer)
+            X_chr4_kmer = seqs2kmer_overlap(X_chr4_train, kmer=kmer)
+            X_chr5_kmer = seqs2kmer_overlap(X_chr5_train, kmer=kmer)
+
+            # X_chr1_tokenizer = kmer_embed(X_chr1_kmer, kmer=6)
+            X_chr1_tokenizer = load_kmer_tokenizer(kmer=kmer)
+
+            X_test_chr1_kmer = seqs2kmer_overlap(X_chr1_test, kmer=kmer)
+            X_test_chr2_kmer = seqs2kmer_overlap(X_chr2_test, kmer=kmer)
+            X_test_chr3_kmer = seqs2kmer_overlap(X_chr3_test, kmer=kmer)
+            X_test_chr4_kmer = seqs2kmer_overlap(X_chr4_test, kmer=kmer)
+            X_test_chr5_kmer = seqs2kmer_overlap(X_chr5_test, kmer=kmer)
+
+            x1_maxlen = find_max_kmer_length(X_chr1_kmer, X_chr1_tokenizer) #401
+            x2_maxlen = find_max_kmer_length(X_chr2_kmer, X_chr1_tokenizer) #283
+            x3_maxlen = find_max_kmer_length(X_chr3_kmer, X_chr1_tokenizer) #336
+            x4_maxlen = find_max_kmer_length(X_chr4_kmer, X_chr1_tokenizer) #288
+            x5_maxlen = find_max_kmer_length(X_chr5_kmer, X_chr1_tokenizer) #361
+
+
+            embedded_X_chr1 = np.array(encode_sequences(X_chr1_kmer, X_chr1_tokenizer, max_length=x1_maxlen))
+            embedded_X_chr2 = np.array(encode_sequences(X_chr2_kmer, X_chr1_tokenizer, max_length=x2_maxlen))
+            embedded_X_chr3 = np.array(encode_sequences(X_chr3_kmer, X_chr1_tokenizer, max_length=x3_maxlen))
+            embedded_X_chr4 = np.array(encode_sequences(X_chr4_kmer, X_chr1_tokenizer, max_length=x4_maxlen))
+            embedded_X_chr5 = np.array(encode_sequences(X_chr5_kmer, X_chr1_tokenizer, max_length=x5_maxlen))
+
+            list_X_train = [embedded_X_chr1, embedded_X_chr2, embedded_X_chr3, embedded_X_chr4, embedded_X_chr5]
+
+            embedded_X_test_chr1 = np.array(encode_sequences(X_test_chr1_kmer, X_chr1_tokenizer, max_length=x1_maxlen))
+            embedded_X_test_chr2 = np.array(encode_sequences(X_test_chr2_kmer, X_chr1_tokenizer, max_length=x2_maxlen))
+            embedded_X_test_chr3 = np.array(encode_sequences(X_test_chr3_kmer, X_chr1_tokenizer, max_length=x3_maxlen))
+            embedded_X_test_chr4 = np.array(encode_sequences(X_test_chr4_kmer, X_chr1_tokenizer, max_length=x4_maxlen))
+            embedded_X_test_chr5 = np.array(encode_sequences(X_test_chr5_kmer, X_chr1_tokenizer, max_length=x5_maxlen))
+
+            list_X_train = [embedded_X_chr1, embedded_X_chr2, embedded_X_chr3, embedded_X_chr4, embedded_X_chr5]
+            list_X_test = [embedded_X_test_chr1, embedded_X_test_chr2, embedded_X_test_chr3, embedded_X_test_chr4, embedded_X_test_chr5]
+
+            src_vocab_size = len(X_chr1_tokenizer)
+
+        if model_name == 'MLPMixer':
+            print('Run: MLPMixer | Split chromosome - Embedding {} - Dataset {} - Ratio {}'.format(embedding_type, dataset, ratio))
+            evaluate_result_splitchr(datapath, model_name, list_X_train, src_vocab_size, y_train, list_X_test, y_test, best_params, data_variants, device)
+        elif model_name == 'Test1_CNN':
+            print('Run: Test1_CNN | Split chromosome - Embedding {} - Dataset {} - Ratio {}'.format(embedding_type, dataset, ratio))
+            evaluate_result_splitchr(datapath, model_name, list_X_train, src_vocab_size, y_train, list_X_test, y_test, best_params, data_variants, device)
+        elif model_name == 'Transformer':
+            print('Run: Test1_Transformer | Split chromosome - Embedding {} - Dataset {} - Ratio {}'.format(embedding_type, dataset, ratio))
+            evaluate_result_splitchr(datapath, model_name, list_X_train, src_vocab_size, y_train, list_X_test, y_test, best_params, data_variants, device)
+        elif model_name == 'Test2_Infinite_Transformer':
+            print('Run: Test2_Infinite_Transformer | Split chromosome - Embedding {} - Dataset {} - Ratio {}'.format(embedding_type, dataset, ratio))
+            evaluate_result_splitchr(datapath, model_name, list_X_train, src_vocab_size, y_train, list_X_test, y_test, best_params, data_variants, device)
+        elif model_name == 'HyperMixer':
+            print('Run: Test1_HyperMixer | Split chromosome - Embedding {} - Dataset {} - Ratio {}'.format(embedding_type, dataset, ratio))
+            evaluate_result_splitchr(datapath, model_name, list_X_train, src_vocab_size, y_train, list_X_test, y_test, best_params, data_variants, device)
+
+        
 
     elif model_type == 'Regular':
         print('Type: Regular')
