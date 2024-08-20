@@ -81,6 +81,28 @@ def train_one_epoch(model, train_loader, loss_function, optimizer, device):
         loss_training.backward()
         optimizer.step()
 
+def train_one_epoch_splitchr(model, train_loader, loss_function, optimizer, device):
+    
+    model.train()
+    
+    # iterate through the train loader
+    for i, (inputs, targets) in enumerate(train_loader):       
+
+        inputs  = [in_data.to(device) for in_data in inputs]
+        targets = targets.to(device)
+
+        # forward pass
+        pred_outputs = model(inputs)
+
+        # calculate training loss
+        loss_training = loss_function(pred_outputs, targets)
+        # print('\t [train_one_epoch] train_loss={:.5f}'.format(loss_training))
+
+        # backward pass and optimization
+        optimizer.zero_grad()
+        loss_training.backward()
+        optimizer.step()
+
 
 def predict(model, val_loader, device):
     model.eval()
@@ -343,7 +365,7 @@ def evaluate_result_splitchr(datapath, model_name, list_X_train, src_vocab_size,
             # with profile(activities=[ProfilerActivity.CUDA], record_shapes=True, profile_memory=True) as prof:
             #     train_one_epoch(model, train_loader, loss_function, optimizer, device)
             # print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=5))
-            train_one_epoch(model, train_loader, loss_function, optimizer, device)
+            train_one_epoch_splitchr(model, train_loader, loss_function, optimizer, device)
             print('1. Log memory usage for one epoch:')
             log_gpu_memory()
         else:
