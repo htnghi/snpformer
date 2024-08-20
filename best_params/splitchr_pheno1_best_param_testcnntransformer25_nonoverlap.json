@@ -1,0 +1,1 @@
+{'learning_rate': 0.0001, 'weight_decay': 0.007514230683412168, 'activation': 'LeakyReLU', 'early_stop': 20, 'n_blocks': 3, 'n_heads': 3, 'd_k': 68, 'mlp_factor': 6, 'embedding_dim': 88, 'out_feature1': 40, 'kernel_size1': 20, 'kernel_size2': 19, 'num_downsamples': 3, 'dropout2': 0.30000000000000004, 'dropout': 0.15000000000000002, 'avg_epochs': 65}

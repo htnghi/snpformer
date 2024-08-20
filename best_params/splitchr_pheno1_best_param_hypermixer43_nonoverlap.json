@@ -1,0 +1,1 @@
+{"learning_rate": 0.0001, "weight_decay": 0.0015607892088416904, "n_blocks": 2, "n_heads": 6, "d_k": 32, "mlp_factor": 4, "dropout": 0.45000000000000007, "avg_epochs": 3}
