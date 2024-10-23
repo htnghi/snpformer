@@ -166,72 +166,34 @@ class AttentionPool(torch.nn.Module):
 
         return (x * attn).sum(dim=-1)
 
-class ConvBlock(torch.nn.Module):
-    def __init__(self, dim, dim_out=None, kernel_size=1):
-        super(ConvBlock, self).__init__()
-
-        self.dim_out = dim_out if dim_out is not None else dim
-        self.batch_norm = torch.nn.BatchNorm1d(dim)
-        self.activation = torch.nn.GELU()
-        self.conv1d = torch.nn.Conv1d(dim, self.dim_out, kernel_size, padding=kernel_size // 2)
-
-    def forward(self, x):
-        x = self.batch_norm(x)
-        x = self.activation(x)
-        x = self.conv1d(x)
-        return x
-    
-class initial_cnn(torch.nn.Module):
-    def __init__(self, tuning_params):
-        super(initial_cnn, self).__init__()
-
-        self.conv1d = torch.nn.Conv1d(in_channels=tuning_params['embedding_dim'], out_channels=tuning_params['out_feature1'], kernel_size=tuning_params['kernel_size1'])
-        # self.residual_block = Residual(ConvBlock(tuning_params['out_feature1']))
-        # self.activation = torch.nn.GELU()
-        # self.activation = get_activation_func(tuning_params['activation1'])
-        # self.batch_norm = torch.nn.BatchNorm1d(tuning_params['out_feature1'])
-
-        # self.attention_pool = torch.nn.MaxPool1d(kernel_size=2)
-        self.attention_pool = AttentionPool(tuning_params['out_feature1'], pool_size=2)
-        # self.dropout = Dropout(tuning_params['dropout1'])
-
-    def forward(self, x):
-        # print('Input x', x.shape) 
+class DynamicConvBlock(torch.nn.Module):
+    def __init__(self, in_filters, final_out_filters, num_layers, tuning_params):
+        super(DynamicConvBlock, self).__init__()
         
-        x = self.conv1d(x)
-        # print('Shape after conv1d inside initial_cnn layer', x.shape) #(batch, out_feature1, new_seq_len) #torch.Size([32, 24, 1648])
-        # x = self.residual_block(x)
-        # print('Shape after residual_block inside initial_cnn layer', x.shape) #torch.Size([32, 24, 1648])
-        # x = self.activation(x)
-        # x = self.batch_norm(x)
-        x = self.attention_pool(x)
-        # print('Shape after attention_pool inside initial_cnn layer', x.shape) #(batch, half_dim, new_seq_len1) #torch.Size([32, 24, 824])
-        # x = self.dropout(x)
+        layers = []
+        # Ensure that the number of layers is at least 2
+        assert num_layers >= 2, "Number of layers must be at least 2"
+        
+        # Use exponential filter increase instead of linear
+        self.filter_list = self.exponential_linspace_int(in_filters, final_out_filters, num_layers - 1)
+        self.filter_lists = [in_filters, *self.filter_list]
+        
+        # Add layers progressively increasing filters
+        for dim_in, dim_out in zip(self.filter_lists[:-1], self.filter_lists[1:]):  # All layers except the last one
+            layers.append(torch.nn.Conv1d(dim_in, dim_out, kernel_size=tuning_params['kernel_size'], stride=tuning_params.get('stride', 1)))
+            layers.append(torch.nn.BatchNorm1d(dim_out))
+            layers.append(AttentionPool(dim_out, pool_size=2))
+            # layers.append(torch.nn.Dropout(tuning_params['dropout_cnn']))
+        
+        # Last layer: Conv1D with current_filters -> final_out_filters
+        layers.append(torch.nn.Conv1d(self.filter_list[-1], final_out_filters, kernel_size=tuning_params['kernel_size'], stride=tuning_params.get('stride', 1)))
+        layers.append(torch.nn.BatchNorm1d(final_out_filters))
+        layers.append(AttentionPool(final_out_filters, pool_size=2))
+        # layers.append(torch.nn.Dropout(tuning_params['dropout_cnn']))
 
-        return x
+        # Store the layers in a Sequential container
+        self.conv_block = torch.nn.Sequential(*layers)
     
-class ConvBlockSequence(torch.nn.Module):
-    def __init__(self, out_feature2, tuning_params):
-        super(ConvBlockSequence, self).__init__()
-
-        # self.filter_list = self.exponential_linspace_int(tuning_params['out_feature1'], tuning_params['embedding_dim'], num=(tuning_params['num_downsamples'] - 1))
-        self.filter_list = self.exponential_linspace_int(tuning_params['out_feature1'], out_feature2, num=(tuning_params['num_downsamples'] - 1))
-        self.filter_lists = [tuning_params['out_feature1'], *self.filter_list]
-
-        self.conv_layers = torch.nn.ModuleList()
-
-        for dim_in, dim_out in zip(self.filter_lists[:-1], self.filter_lists[1:]):
-            # print('Dim_in: {}, dim_out:{}'. format(dim_in, dim_out))
-            # self.conv_layers.append(ConvBlock(dim_in, dim_out, kernel_size=tuning_params['kernel_size2']))
-            self.conv_layers.append(torch.nn.Conv1d(in_channels=dim_in, out_channels=dim_out, kernel_size=tuning_params['kernel_size2']))
-            # self.conv_layers.append(torch.nn.GELU())
-            # self.conv_layers.append(get_activation_func(tuning_params['activation1']))
-            # self.conv_layers.append(torch.nn.BatchNorm1d(dim_out))
-
-            # self.conv_layers.append(torch.nn.MaxPool1d(kernel_size=2))
-            self.conv_layers.append(AttentionPool(dim_out, pool_size=2))
-            # self.conv_layers.append(Dropout(tuning_params['dropout1']))
-
     def exponential_linspace_int(self, start, end, num, divisible_by=1):
         """ Generates a list of integers in exponentially increasing order. """
         if num == 1:
@@ -243,20 +205,72 @@ class ConvBlockSequence(torch.nn.Module):
         return result
 
     def forward(self, x):
-        for layer in self.conv_layers:
-            x = layer(x)
-        return x
+        # Pass the input through the Conv1D layers, BatchNorm, Attention Pooling, and Dropout
+        return self.conv_block(x)
+
+class CNN_Transformer_eachchr(torch.nn.Module):
+    def __init__(self, device, src_vocab_size, max_seq_len, out_feature2, tuning_params):
+        super(CNN_Transformer_eachchr, self).__init__()
+        self.src_vocab_size = src_vocab_size
+        self.tuning_params  = tuning_params
+        self.max_seq_len = max_seq_len
+        self.device = device  # Storing the device
+
+        # self.embedding = embed_layer.Embedding(src_vocab_size, tuning_params['embedding_dim'], tuning_params['dropout_embed'])
+        self.embedding = embed_layer.Embedding(src_vocab_size, tuning_params['embedding_dim'])
+        # self.positional_encoding = embed_layer.PositionalEncoding(tuning_params['embedding_dim'], max_seq_len, tuning_params['dropout'])
+        self.conv_blocks = DynamicConvBlock(in_filters=tuning_params['embedding_dim'], final_out_filters=out_feature2, num_layers=tuning_params['num_downsamples'], tuning_params=tuning_params)
+
+        self.transformer = None
+        self.device = device
+        self.out_feature2 = out_feature2
+
+        # Move to device
+        self.to(device)
+
+    def forward(self, input_X, mask=None):
+
+        x = self.embedding(input_X)
+        # x = self.positional_encoding(x)
+
+        x = x.permute(0, 2, 1)
+        # print('Shape after Embedding', x.shape)
+
+        # x = self.conv_layers(x)
+        # print('Shape after initial_cnn layer', x.shape)
+
+        x = self.conv_blocks(x)
+        # print('Shape after ConvBlockSequence layer', x.shape) #(batch, embed_dim, new_seq_len) #torch.Size([32, 128, 3])
+        seq_length_out_cnn = x.size(2)
+
+        x = x.permute(0, 2, 1)
+        # print('Shape after Permute layer', x.shape)
+
+        if self.transformer is None:
+            self.transformer = TransformerSNP(self.device, seq_length_out_cnn, self.out_feature2, self.tuning_params).to(self.device)
+        
+        # Pass the CNN output and the sequence length into the Transformer block
+        transformer_output = self.transformer(x, mask=mask)
+        # print('Shape after Transformer layer', x.shape)
+
+        return transformer_output
+    
 
 class TransformerSNP(torch.nn.Module):
-    def __init__(self, device, out_feature2, tuning_params):
+    def __init__(self, device, seq_length_out_cnn, out_feature2, tuning_params):
         super(TransformerSNP, self).__init__()
 
+        # self.positional_encoding = embed_layer.PositionalEncoding(out_feature2, seq_length_out_cnn, tuning_params['dropout'])
+        # self.positional_encoding = embed_layer.PositionalEncoding(out_feature2, seq_length_out_cnn, tuning_params['dropout_position'])
+        self.positional_encoding = embed_layer.PositionalEncoding(out_feature2, seq_length_out_cnn, tuning_params['dropout_transformer'])
+
         self.encoder_blocks = torch.nn.ModuleList([
-            encoder.Encoder(device, out_feature2, tuning_params['n_heads'], tuning_params['mlp_factor'], tuning_params['dropout'], use_rope=False)
+            encoder.Encoder(device, out_feature2, tuning_params['n_heads'], tuning_params['mlp_factor'], tuning_params['dropout_transformer'], use_rope=False)
             for _ in range(tuning_params['n_blocks'])
         ])
 
     def forward(self, x, mask):
+        x = self.positional_encoding(x)
         i = 0
         for block in self.encoder_blocks:
             x = block(x, mask)
@@ -268,7 +282,7 @@ class RegressionBlock(torch.nn.Module):
         super(RegressionBlock, self).__init__()
 
         self.pooling_layer  = Pooling_Transformer_output()
-        self.dropout = Dropout(tuning_params['dropout2'])
+        self.dropout = Dropout(tuning_params['dropout_linear'])
         self.linear  = Linear(in_features=out_feature2, out_features=1)
         self.act = get_activation_func(tuning_params['activation'])
 
@@ -281,39 +295,6 @@ class RegressionBlock(torch.nn.Module):
         x = self.act(x)
         return x
 
-class CNN_Transformer_eachchr(torch.nn.Module):
-    def __init__(self, device, src_vocab_size, max_seq_len, out_feature2, tuning_params):
-        super(CNN_Transformer_eachchr, self).__init__()
-        self.src_vocab_size = src_vocab_size
-        self.tuning_params  = tuning_params
-        self.max_seq_len = max_seq_len
-
-        self.embedding = embed_layer.Embedding(src_vocab_size, tuning_params['embedding_dim'])
-        self.positional_encoding = embed_layer.PositionalEncoding(tuning_params['embedding_dim'], max_seq_len, tuning_params['dropout'])
-        self.conv_layers = initial_cnn(tuning_params)
-        self.conv_blocks = ConvBlockSequence(out_feature2, tuning_params)
-        self.transformer = TransformerSNP(device, out_feature2, tuning_params)
-
-    def forward(self, input_X, mask=None):
-        x = self.embedding(input_X)
-        x = self.positional_encoding(x)
-
-        x = x.permute(0, 2, 1)
-        # print('Shape after Embedding', x.shape)
-
-        x = self.conv_layers(x)
-        # print('Shape after initial_cnn layer', x.shape)
-
-        x = self.conv_blocks(x)
-        # print('Shape after ConvBlockSequence layer', x.shape) #(batch, embed_dim, new_seq_len) #torch.Size([32, 128, 3])
-
-        x = x.permute(0, 2, 1)
-        # print('Shape after Permute layer', x.shape)
-
-        transformer_output = self.transformer(x, mask=None)
-        # print('Shape after Transformer layer', x.shape)
-
-        return transformer_output
     
 class CNN_Transformer(torch.nn.Module):
     def __init__(self, device, src_vocab_size, max_seq_len, tuning_params):
@@ -502,28 +483,27 @@ def objective(trial, list_X_train, src_vocab_size, y, data_variants, training_pa
     
     # for tuning parameters
     tuning_params_dict = {
-        'learning_rate': trial.suggest_categorical('learning_rate', [1e-5, 1e-4, 1e-3, 1e-2, 1e-1]), 
-        # 'weight_decay': trial.suggest_categorical('weight_decay', [1e-6, 1e-5, 1e-4, 1e-3, 1e-2]),
-        'weight_decay': trial.suggest_float('weight_decay', 1e-8, 1e-2),
-        # 'lr_decay': trial.suggest_float('lr_decay', 0.95, 0.99, step=0.01),
-        'activation': trial.suggest_categorical('activation', ['LeakyReLU', 'ReLU', 'Tanh', 'GELU']),
+        'learning_rate': trial.suggest_categorical('learning_rate', [1e-5, 1e-4, 1e-3, 1e-2]), 
+        'weight_decay': trial.suggest_float('weight_decay', 1e-6, 1e-2),
+        'activation': trial.suggest_categorical('activation', ['ReLU', 'GELU']),
         'early_stop': trial.suggest_int("early_stop", 5, 20, step=5),
 
-        'n_blocks': trial.suggest_int("n_blocks", 2, 6, step=1),
+        'n_blocks': trial.suggest_int("n_blocks", 2, 8, step=1),
         'n_heads': trial.suggest_int("n_heads", 2, 8, step=1),
-        'd_k':  trial.suggest_int('d_k', 4, 72, step=4),
+        'd_k':  trial.suggest_int('d_k', 8, 72, step=4),
         'mlp_factor': trial.suggest_int("mlp_factor", 2, 6, step=1),
 
-        'embedding_dim': trial.suggest_int("embedding_dim", 32, 256, step=8),
-        'out_feature1': trial.suggest_int("out_feature1", 32, 128, step=8),
-        # 'out_feature2': trial.suggest_int("out_feature2", 8, 96, step=4),
-        'kernel_size1': trial.suggest_int("kernel_size1", 10, 30, step=5),
-        'kernel_size2': trial.suggest_int("kernel_size2", 4, 20, step=1),
+        'embedding_dim': trial.suggest_int("embedding_dim", 112, 256, step=4),
+        'kernel_size': trial.suggest_int("kernel_size", 3, 17, step=1),
+        # 'kernel_size_final': trial.suggest_int("kernel_size_final", 3, 19, step=2),
 
         'num_downsamples': trial.suggest_int("num_downsamples", 2, 6, step=1),
-        # 'pca': trial.suggest_float('pca', 0.85, 0.95, step=0.05),
-        'dropout2': trial.suggest_float('dropout2', 0.1, 0.5, step=0.05),
-        'dropout': trial.suggest_float('dropout', 0.1, 0.5, step=0.05)
+
+        # 'dropout_embed': trial.suggest_float('dropout_embed', 0.0, 0.3, step=0.05),
+        'dropout_linear': trial.suggest_float('dropout_linear', 0.1, 0.5, step=0.05),
+        # 'dropout_cnn': trial.suggest_float('dropout_cnn', 0.0, 0.3, step=0.05),
+        'dropout_transformer': trial.suggest_float('dropout_transformer', 0.1, 0.5, step=0.05),
+        # 'dropout_position': trial.suggest_float('dropout_position', 0.0, 0.4, step=0.1)
     }
 
      # extract preprocessed data variants for tuning
@@ -639,7 +619,7 @@ def objective(trial, list_X_train, src_vocab_size, y, data_variants, training_pa
 # ==============================================================
 # Call tuning function
 # ==============================================================
-def tuning_splitchr_cnntransformer_test1(datapath, list_X_train, src_vocab_size, y, data_variants, training_params_dict, device):
+def tuning_splitchr_cnntransformer(datapath, list_X_train, src_vocab_size, y, data_variants, training_params_dict, device):
 
     # set seeds for reproducibility
     set_seeds()
@@ -657,7 +637,7 @@ def tuning_splitchr_cnntransformer_test1(datapath, list_X_train, src_vocab_size,
     # create an optuna tuning object, num trials default = 100
     num_trials = training_params_dict['num_trials']
     study = optuna.create_study(
-        study_name='transformer'+'mseloss_'+'data',
+        study_name='cnn_transformer'+'mseloss_'+'data',
         direction="minimize",
         sampler=optuna.samplers.TPESampler(seed=training_params_dict['optunaseed']),
         pruner=optuna.pruners.PercentilePruner(percentile=training_params_dict['percentile'], n_min_trials=training_params_dict['min_trials'])
@@ -696,7 +676,7 @@ def tuning_splitchr_cnntransformer_test1(datapath, list_X_train, src_vocab_size,
 # ==============================================================
 # Evaluation the performance on test set
 # ==============================================================
-def evaluate_result_splitchr_cnntransformer_test1(datapath, list_X_train, src_vocab_size, y_train, list_X_test, y_test, best_params, data_variants, device):
+def evaluate_result_splitchr_cnntransformer(datapath, list_X_train, src_vocab_size, y_train, list_X_test, y_test, best_params, data_variants, device):
 
     # set seeds for reproducibility
     set_seeds()
@@ -773,7 +753,7 @@ def evaluate_result_splitchr_cnntransformer_test1(datapath, list_X_train, src_vo
     test_mae = sklearn.metrics.mean_absolute_error(y_true=y_test, y_pred=y_pred)
 
     print('--------------------------------------------------------------')
-    print('Test Transformer results: avg_loss={:.4f}, avg_expvar={:.4f}, avg_r2score={:.4f}, avg_mae={:.4f}'.format(test_mse, test_exp_variance, test_r2, test_mae))
+    print('Test CNN-Transformer Chromosome-based results: avg_loss={:.4f}, avg_expvar={:.4f}, avg_r2score={:.4f}, avg_mae={:.4f}'.format(test_mse, test_exp_variance, test_r2, test_mae))
     print('--------------------------------------------------------------')
 
     return test_exp_variance

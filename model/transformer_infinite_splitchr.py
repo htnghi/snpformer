@@ -117,7 +117,6 @@ class TransformerSNP_infinite(torch.nn.Module):
         self.embedding = embed_layer.Embedding(src_vocab_size, embedding_dimension)
         # self.positional_encoding = embed_layer.PositionalEncoding(embedding_dimension, seq_len, tuning_params['dropout'])
         # self.positional_encoding = embed_layer.PositionalEmbedding(embedding_dimension, seq_len, tuning_params['dropout'])
-        
         self.infinite_transformer = encoder.InfiniteEncoder(
                         device=device,
                         d_model=embedding_dimension,
@@ -129,7 +128,7 @@ class TransformerSNP_infinite(torch.nn.Module):
                         # segment_len = seq_len,
                         update_rule="delta",
                         use_rope=True,
-                        dropout=tuning_params['dropout']
+                        dropout=tuning_params['dropout_transformer']
                         )
         self.encoder_blocks = torch.nn.ModuleList([
             self.infinite_transformer
@@ -151,7 +150,7 @@ class RegressionBlock(torch.nn.Module):
         super(RegressionBlock, self).__init__()
         embedding_dimension = int(tuning_params['n_heads'] * tuning_params['d_k'])
         self.pooling_layer  = Pooling_Transformer_output()
-        self.dropout = Dropout(tuning_params['dropout2'])
+        self.dropout = Dropout(tuning_params['dropout_linear'])
         self.linear  = Linear(in_features=embedding_dimension, out_features=1)
         self.act = get_activation_func(tuning_params['activation'])
 
@@ -379,22 +378,22 @@ def objective(trial, list_X_train, src_vocab_size, y, data_variants, training_pa
     
     # for tuning parameters
     tuning_params_dict = {
-        'learning_rate': trial.suggest_categorical('learning_rate', [1e-5, 1e-4, 1e-3, 1e-2, 1e-1]), 
+        'learning_rate': trial.suggest_categorical('learning_rate', [1e-5, 1e-4, 1e-3, 1e-2]), 
         # 'weight_decay': trial.suggest_categorical('weight_decay', [1e-6, 1e-5, 1e-4, 1e-3, 1e-2]),
-        'weight_decay': trial.suggest_float('weight_decay', 1e-8, 1e-2),
+        'weight_decay': trial.suggest_float('weight_decay', 1e-6, 1e-2),
         # 'lr_decay': trial.suggest_float('lr_decay', 0.95, 0.99, step=0.01),
-        'activation': trial.suggest_categorical('activation', ['LeakyReLU', 'ReLU', 'Tanh', 'GELU']),
+        'activation': trial.suggest_categorical('activation', ['ReLU', 'GELU']),
         'early_stop':  trial.suggest_int("early_stop", 5, 20, step=5),
 
-        'segment_length': trial.suggest_int('segment_length', 64, 256, step=64),
-        'n_blocks': trial.suggest_int("n_blocks", 2, 6, step=2),
+        'segment_length': trial.suggest_int('segment_length', 128, 512, step=64),
+        'n_blocks': trial.suggest_int("n_blocks", 2, 8, step=1),
         'n_heads': trial.suggest_int("n_heads", 2, 8, step=1),
-        'd_k':  trial.suggest_int('d_k', 24, 80, step=8),
+        'd_k':  trial.suggest_int('d_k', 16, 128, step=8),
         'mlp_factor': trial.suggest_int("mlp_factor", 2, 6, step=1),
 
         # 'pca': trial.suggest_float('pca', 0.85, 0.95, step=0.05),
-        'dropout2': trial.suggest_float('dropout2', 0.1, 0.5, step=0.05),
-        'dropout': trial.suggest_float('dropout', 0.1, 0.5, step=0.05)
+        'dropout_linear': trial.suggest_float('dropout_linear', 0.1, 0.5, step=0.05),
+        'dropout_transformer': trial.suggest_float('dropout_transformer', 0.1, 0.5, step=0.05)
     }
 
      # extract preprocessed data variants for tuning
@@ -644,7 +643,7 @@ def evaluate_result_splitchr_transformer_test2_infinite(datapath, list_X_train, 
     test_mae = sklearn.metrics.mean_absolute_error(y_true=y_test, y_pred=y_pred)
 
     print('--------------------------------------------------------------')
-    print('Test Transformer results: avg_loss={:.4f}, avg_expvar={:.4f}, avg_r2score={:.4f}, avg_mae={:.4f}'.format(test_mse, test_exp_variance, test_r2, test_mae))
+    print('Test Infinite Transformer - Chromosome -based results: avg_loss={:.4f}, avg_expvar={:.4f}, avg_r2score={:.4f}, avg_mae={:.4f}'.format(test_mse, test_exp_variance, test_r2, test_mae))
     print('--------------------------------------------------------------')
 
     return test_exp_variance
