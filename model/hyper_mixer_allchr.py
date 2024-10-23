@@ -117,7 +117,7 @@ class MLP(nn.Module):
         self.fc1 = nn.Linear(input_dim, hidden_dim)
         self.gelu = nn.GELU()
         self.fc2 = nn.Linear(hidden_dim, input_dim)
-        self.dropout = nn.Dropout(tuning_params['dropout'])
+        self.dropout = nn.Dropout(tuning_params['dropout_mixer'])
 
     def forward(self, x):
         y = self.fc1(x)
@@ -129,11 +129,13 @@ class MLP(nn.Module):
 
 # Channel Mixing MLPs : Allow communication within channels ( features of embeddings )
 class ChannelMixing(nn.Module):
-    def __init__(self, num_patches, channels, feature_mixing_factor, tuning_params):
+    def __init__(self, num_patches, channels, tuning_params):
         super(ChannelMixing, self).__init__()
 
-        hidden_dim_feature_mixing = int(channels * feature_mixing_factor)
-        self.layer_norm = nn.LayerNorm([num_patches, channels])
+        hidden_dim_feature_mixing = int(channels * tuning_params['feature_mixing_mlp_factor'])
+        # hidden_dim_feature_mixing = tuning_params['hidden_dim_feature_mixing']
+        # self.layer_norm = nn.LayerNorm([num_patches, channels])
+        self.layer_norm = nn.LayerNorm(channels)
         self.mlp = MLP(channels, hidden_dim_feature_mixing, tuning_params)
 
     def forward(self, x):
@@ -152,17 +154,27 @@ class Mixer(nn.Module):
     def __init__(self, num_patches, maxlen, channels, tuning_params):
         super(Mixer, self).__init__()
 
-        hidden_dim_hyper_mixing = int(num_patches * tuning_params['hyper_mixing_mlp_factor'])
-        self.layer_norm = nn.LayerNorm([num_patches, channels])
-        self.hyper_mixing_out = hypermixing.HyperMixing(input_output_dim=channels, hypernet_size=hidden_dim_hyper_mixing, max_length=maxlen)
-        self.channel_mixing = ChannelMixing(num_patches, channels, tuning_params['feature_mixing_mlp_factor'], tuning_params)
+        # hidden_dim_hyper_mixing = int(num_patches * tuning_params['hyper_mixing_mlp_factor'])
+        # Ensure hidden_dim_hyper_mixing is divisible by num_heads
+        # hidden_dim_hyper_mixing = (hidden_dim_hyper_mixing // tuning_params['num_heads']) * tuning_params['num_heads']
+        # hidden_dim_hyper_mixing = tuning_params['hidden_dim_hyper_mixing']
+        hidden_dim_hyper_mixing = int(tuning_params['hidden_dim_hyper_mixing']*tuning_params['num_heads'])
+
+        # self.layer_norm = nn.LayerNorm([num_patches, channels])
+        self.layer_norm = nn.LayerNorm(channels)
+        self.hyper_mixing_out = hypermixing.HyperMixing(input_output_dim=channels, hypernet_size=hidden_dim_hyper_mixing, dropout_position=0.0, dropout=tuning_params['dropout_mixer'], max_length=maxlen, num_heads=tuning_params['num_heads'])
+        # self.hyper_mixing_out = hypermixing.HyperMixing(input_output_dim=channels, hypernet_size=hidden_dim_hyper_mixing, dropout=0.0, max_length=maxlen, num_heads=tuning_params['num_heads'])
+        self.channel_mixing = ChannelMixing(num_patches, channels, tuning_params)
+        # self.dropout = nn.Dropout(tuning_params['dropout2'])
 
     def forward(self, x, mask):
-        # print('Shape of x before Token mixing',  x.shape) #torch.Size([32, 4, 64])
+        # print('Shape of x before Hyper mixing',  x.dtype) #torch.Size([32, 4, 64])
+        
+        x_norm = self.layer_norm(x)
         # Token Mixing
         # print('Call TokenMixing in Mixer')
-        hyper_mixing_out = self.hyper_mixing_out(x, x, x, mask, mask)
-        # print('Out token mixing in Mixer', token_mixing_out.shape) #torch.Size([32, 64, 4])
+        hyper_mixing_out = self.hyper_mixing_out(x_norm, x_norm, x_norm, mask, mask)
+        # print('Out hyper mixing in Mixer', hyper_mixing_out.shape) #torch.Size([32, 64, 4])
 
         # Skip connection
         x = x + hyper_mixing_out  #torch.Size([32, 4, 64])
@@ -171,6 +183,7 @@ class Mixer(nn.Module):
         # Channel Mixing
         channel_mixing_out = self.channel_mixing(x)
         x = x + channel_mixing_out  # Skip connection
+        # x = self.layer_norm(x)
 
         return x #torch.Size([32, 4, 64])
     
@@ -179,18 +192,20 @@ class MixerModel(nn.Module):
     def __init__(self, vocab_size, maxlen, tuning_params):
         super(MixerModel, self).__init__()
 
+        embed_dim = int(tuning_params['d_k']*tuning_params['num_heads'])
         # num_patches = int(maxlen // tuning_params['patch_size'])
         num_patches = maxlen
 
-        self.embedding = embed_layer.Embedding(vocab_size, tuning_params['embedding_dim'])
+        self.embedding = embed_layer.Embedding(vocab_size, embed_dim)
         # Conv1D layer to produce patches from given sequences.
         # self.conv1d = nn.Conv1d(in_channels=embedding_dim, out_channels=embedding_dim, kernel_size=tuning_params['patch_size'], stride=tuning_params['patch_size'], bias=False)
         # self.conv1d = nn.Conv1d(in_channels=embedding_dim, out_channels=embedding_dim, kernel_size=1, stride=1, bias=False)
-        self.mixers = nn.ModuleList([Mixer(num_patches, maxlen, tuning_params['embedding_dim'], tuning_params) for _ in range(tuning_params['num_mixer_layers'])])
-        self.layer_norm = nn.LayerNorm(tuning_params['embedding_dim'])
-        self.global_avg_pool = nn.AdaptiveAvgPool1d(output_size=1)
-        self.dropout = Dropout(tuning_params['dropout2'])
-        self.fc = nn.Linear(in_features=tuning_params['embedding_dim'], out_features=1)
+        self.mixers = nn.ModuleList([Mixer(num_patches, maxlen, embed_dim, tuning_params) for _ in range(tuning_params['num_mixer_layers'])])
+        self.layer_norm = nn.LayerNorm(embed_dim)
+        # self.global_avg_pool = nn.AdaptiveAvgPool1d(output_size=1)
+        self.pooling_layer  = Pooling_Transformer_output()
+        self.dropout = Dropout(tuning_params['dropout_linear'])
+        self.fc = nn.Linear(in_features=embed_dim, out_features=1)
         self.act = get_activation_func(tuning_params['activation'])
     
     def create_padding_mask(self, input_tensor, padding_token_value=0):
@@ -219,8 +234,10 @@ class MixerModel(nn.Module):
 
         x = self.layer_norm(x)
         # print('shape after Normalization in MixerModel', x.shape) #torch.Size([32, 4, 64])
-        x = x.permute(0, 2, 1) #torch.Size([32, 64, 4])
-        x = self.global_avg_pool(x).squeeze(-1)  # Change shape to (batch_size, embedding_dim)
+        # x = x.permute(0, 2, 1) #torch.Size([32, 64, 4])
+        # x = self.global_avg_pool(x).squeeze(-1)  # Change shape to (batch_size, embedding_dim)
+        
+        x = self.pooling_layer(x)
         # print('shape after Global Pooling in MixerModel', x.shape) #torch.Size([32, 64])
         x = self.dropout(x)
         x = self.fc(x)
@@ -238,6 +255,7 @@ def train_one_epoch(model, train_loader, loss_function, optimizer, device):
     
     # iterate through the train loader
     for i, (inputs, targets) in enumerate(train_loader):
+       
         inputs, targets = inputs.to(device), targets.to(device)
 
         # forward pass
@@ -369,21 +387,19 @@ def objective(trial, X, src_vocab_size, y, data_variants, training_params_dict, 
     
     # for tuning parameters
     tuning_params_dict = {
-        'learning_rate': trial.suggest_categorical('learning_rate', [1e-5, 1e-4, 1e-3, 1e-2, 1e-1]), 
-        # 'weight_decay': trial.suggest_categorical('weight_decay', [1e-6, 1e-5, 1e-4, 1e-3, 1e-2]),
-        'weight_decay': trial.suggest_float('weight_decay', 1e-8, 1e-2),
-        # 'lr_decay': trial.suggest_float('lr_decay', 0.95, 0.99, step=0.01),
-        'activation': trial.suggest_categorical('activation', ['LeakyReLU', 'ReLU', 'Tanh', 'GELU']),
+        'learning_rate': trial.suggest_categorical('learning_rate', [1e-5, 1e-4, 1e-3, 1e-2]), 
+        'weight_decay': trial.suggest_float('weight_decay', 1e-6, 1e-2),
+        'activation': trial.suggest_categorical('activation', ['ReLU', 'GELU']),
         'early_stop': trial.suggest_int("early_stop", 5, 20, step=5),
-    
+
         'num_mixer_layers': trial.suggest_int("num_mixer_layers", 2, 8, step=1),
-        'embedding_dim': trial.suggest_int("embedding_dim", 16, 128, step=4),
-        'hyper_mixing_mlp_factor': trial.suggest_float('hyper_mixing_mlp_factor', 0.1, 0.8, step=0.1),
-        'feature_mixing_mlp_factor': trial.suggest_float('feature_mixing_mlp_factor', 10, 25, step=1),
-        
-        # 'pca': trial.suggest_float('pca', 0.85, 0.95, step=0.05),
-        'dropout2': trial.suggest_float('dropout2', 0.1, 0.5, step=0.05),
-        'dropout': trial.suggest_float('dropout', 0.1, 0.5, step=0.05)
+        'd_k': trial.suggest_int("d_k", 8, 256, step=8),
+        'hidden_dim_hyper_mixing':  trial.suggest_int("hidden_dim_hyper_mixing", 16, 512, step=16),
+        'feature_mixing_mlp_factor': trial.suggest_float('feature_mixing_mlp_factor', 0.2, 10.0, step=0.2),
+        'num_heads': trial.suggest_int("num_heads", 2, 8, step=1),
+
+        'dropout_mixer': trial.suggest_float('dropout_mixer', 0.1, 0.5, step=0.05),
+        'dropout_linear': trial.suggest_float('dropout_linear', 0.1, 0.5, step=0.05)
     }
 
      # extract preprocessed data variants for tuning
@@ -504,7 +520,7 @@ def tuning_regular_hypermixer_test1(datapath, X_train, src_vocab_size, y, data_v
     # create an optuna tuning object, num trials default = 100
     num_trials = training_params_dict['num_trials']
     study = optuna.create_study(
-        study_name='transformer'+'mseloss_'+'data',
+        study_name='hypermixer'+'mseloss_'+'data',
         direction="minimize",
         sampler=optuna.samplers.TPESampler(seed=training_params_dict['optunaseed']),
         pruner=optuna.pruners.PercentilePruner(percentile=training_params_dict['percentile'], n_min_trials=training_params_dict['min_trials'])
@@ -612,7 +628,7 @@ def evaluate_result_regular_hypermixer_test1(datapath, X_train, src_vocab_size, 
     test_mae = sklearn.metrics.mean_absolute_error(y_true=y_test, y_pred=y_pred)
 
     print('--------------------------------------------------------------')
-    print('Test Transformer results: avg_loss={:.4f}, avg_expvar={:.4f}, avg_r2score={:.4f}, avg_mae={:.4f}'.format(test_mse, test_exp_variance, test_r2, test_mae))
+    print('Test HyperMixer - Full results: avg_loss={:.4f}, avg_expvar={:.4f}, avg_r2score={:.4f}, avg_mae={:.4f}'.format(test_mse, test_exp_variance, test_r2, test_mae))
     print('--------------------------------------------------------------')
 
     return test_exp_variance

@@ -1,1 +1,0 @@
-{'learning_rate': 0.01, 'weight_decay': 0.0018651932388134382, 'activation': 'Tanh', 'early_stop': 15, 'max_seq_len': 192, 'n_blocks': 6, 'n_heads': 3, 'd_k': 72, 'mlp_factor': 3, 'dropout2': 0.5, 'dropout': 0.15000000000000002, 'avg_epochs': 28}

@@ -1,0 +1,1 @@
+{'learning_rate': 1e-05, 'weight_decay': 0.0008993551934165121, 'activation': 'ReLU', 'early_stop': 5, 'segment_length': 448, 'n_blocks': 3, 'n_heads': 6, 'd_k': 104, 'mlp_factor': 3, 'dropout_linear': 0.45000000000000007, 'dropout_transformer': 0.1, 'avg_epochs': 51}

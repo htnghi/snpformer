@@ -98,10 +98,10 @@ class TransformerSNP_chunk(torch.nn.Module):
         embedding_dimension = int(tuning_params['n_heads'] * tuning_params['d_k'])
 
         self.embedding = embed_layer.Embedding(src_vocab_size, embedding_dimension)
-        # self.positional_encoding = embed_layer.PositionalEncoding(embedding_dimension, max_seq_len, tuning_params['dropout'])
+        self.positional_encoding = embed_layer.PositionalEncoding(embedding_dimension, max_len, tuning_params['dropout_transformer'])
         # self.positional_embed = embed_layer.PositionalEmbedding(embedding_dimension, max_len, tuning_params['dropout'])
         self.encoder_blocks = torch.nn.ModuleList([
-            encoder.EncoderChunk(device, embedding_dimension, tuning_params['n_heads'], tuning_params['mlp_factor'], tuning_params['dropout'], use_rope=True)
+            encoder.EncoderChunk(device, embedding_dimension, tuning_params['n_heads'], tuning_params['mlp_factor'], tuning_params['dropout_transformer'], use_rope=False)
             for _ in range(tuning_params['n_blocks'])
         ])
 
@@ -124,7 +124,7 @@ class TransformerSNP_chunk(torch.nn.Module):
         # print('Inside Transformer chunk')
         mask = self.create_mask(x)
         x = self.embedding(x)
-        # x = self.positional_embed(x)
+        x = self.positional_encoding(x)
         
         if x.size(1) > self.max_seq_len:
             chunks = self.split_sequence(x, self.max_seq_len)
@@ -149,7 +149,7 @@ class RegressionBlock(torch.nn.Module):
         super(RegressionBlock, self).__init__()
         embedding_dimension = int(tuning_params['n_heads'] * tuning_params['d_k'])
         self.pooling_layer  = Pooling_Transformer_output()
-        self.dropout = Dropout(tuning_params['dropout2'])
+        self.dropout = Dropout(tuning_params['dropout_linear'])
         self.linear  = Linear(in_features=embedding_dimension, out_features=1)
         self.act = get_activation_func(tuning_params['activation'])
 
@@ -334,22 +334,23 @@ def objective(trial, X, src_vocab_size, y, data_variants, training_params_dict, 
     
     # for tuning parameters
     tuning_params_dict = {
-        'learning_rate': trial.suggest_categorical('learning_rate', [1e-5, 1e-4, 1e-3, 1e-2, 1e-1]), 
+        'learning_rate': trial.suggest_categorical('learning_rate', [1e-5, 1e-4, 1e-3, 1e-2]), 
         # 'weight_decay': trial.suggest_categorical('weight_decay', [1e-6, 1e-5, 1e-4, 1e-3, 1e-2]),
-        'weight_decay': trial.suggest_float('weight_decay', 1e-8, 1e-2),
+        'weight_decay': trial.suggest_float('weight_decay', 1e-6, 1e-2),
         # 'lr_decay': trial.suggest_float('lr_decay', 0.95, 0.99, step=0.01),
-        'activation': trial.suggest_categorical('activation', ['LeakyReLU', 'ReLU', 'Tanh', 'GELU']),
+        'activation': trial.suggest_categorical('activation', ['ReLU', 'GELU']),
         'early_stop': trial.suggest_int("early_stop", 5, 20, step=5),
 
-        'max_seq_len': trial.suggest_int('max_seq_len', 128, 512, step=64),
-        'n_blocks': trial.suggest_int("n_blocks", 2, 8, step=2),
+        # 'max_seq_len': trial.suggest_int('max_seq_len', 384, 512, step=64),
+        'n_blocks': trial.suggest_int("n_blocks", 2, 8, step=1),
         'n_heads': trial.suggest_int("n_heads", 2, 8, step=1),
-        # 'embedding_dim': trial.suggest_int("embedding_dim", 16, 256, step=8),
-        'd_k':  trial.suggest_int('d_k', 24, 96, step=8),
+        # 'd_k': trial.suggest_categorical('d_k', [16, 32, 64]),
+        'd_k':  trial.suggest_int('d_k', 16, 256, step=4),
         'mlp_factor': trial.suggest_int("mlp_factor", 2, 6, step=1),
 
-        'dropout2': trial.suggest_float('dropout2', 0.1, 0.5, step=0.05),
-        'dropout': trial.suggest_float('dropout', 0.1, 0.5, step=0.05)
+        # 'pca': trial.suggest_float('pca', 0.85, 0.95, step=0.05),
+        'dropout_linear': trial.suggest_float('dropout_linear', 0.1, 0.5, step=0.05),
+        'dropout_transformer': trial.suggest_float('dropout_transformer', 0.1, 0.5, step=0.05)
     }
 
      # extract preprocessed data variants for tuning
@@ -389,8 +390,9 @@ def objective(trial, X, src_vocab_size, y, data_variants, training_params_dict, 
         #     X_train, X_val = decomposition_PCA(X_train, X_val)
 
         max_len = X_train.shape[1]
-        max_seq_len = tuning_params_dict['max_seq_len']
-        
+        # max_seq_len = tuning_params_dict['max_seq_len']
+        max_seq_len = int(512)
+
         set_seeds(seed=int(42+fold))
         try:
             model = EnsembledModel(device, src_vocab_size, max_len, max_seq_len, tuning_params=tuning_params_dict).to(device)
@@ -471,7 +473,7 @@ def tuning_regular_transformer_test1(datapath, X_train, src_vocab_size, y, data_
     # create an optuna tuning object, num trials default = 100
     num_trials = training_params_dict['num_trials']
     study = optuna.create_study(
-        study_name='transformer'+'mseloss_'+'data',
+        study_name='transformer_full'+'mseloss_'+'data',
         direction="minimize",
         sampler=optuna.samplers.TPESampler(seed=training_params_dict['optunaseed']),
         pruner=optuna.pruners.PercentilePruner(percentile=training_params_dict['percentile'], n_min_trials=training_params_dict['min_trials'])
@@ -541,7 +543,8 @@ def evaluate_result_regular_transformer_test1(datapath, X_train, src_vocab_size,
     momentum = best_params['weight_decay']
 
     max_len = X_train.shape[1]
-    max_seq_lens = best_params['max_seq_len']
+    # max_seq_lens = best_params['max_seq_len']
+    max_seq_lens = int(512)
 
     # create model
     model = EnsembledModel(device, src_vocab_size, max_len, max_seq_lens, tuning_params=best_params).to(device)
@@ -568,10 +571,8 @@ def evaluate_result_regular_transformer_test1(datapath, X_train, src_vocab_size,
         # Step the scheduler to adjust the learning rate
         # scheduler.step()
     
-    # predict
+    # predict result test 
     y_pred = predict(model, test_loader, device)
-
-    # convert the predicted y values
     y_pred = minmax_scaler.inverse_transform(y_pred)
 
     # collect mse, r2, explained variance
@@ -581,7 +582,7 @@ def evaluate_result_regular_transformer_test1(datapath, X_train, src_vocab_size,
     test_mae = sklearn.metrics.mean_absolute_error(y_true=y_test, y_pred=y_pred)
 
     print('--------------------------------------------------------------')
-    print('Test Transformer results: avg_loss={:.4f}, avg_expvar={:.4f}, avg_r2score={:.4f}, avg_mae={:.4f}'.format(test_mse, test_exp_variance, test_r2, test_mae))
+    print('Test Transformer Full results: avg_loss={:.4f}, avg_expvar={:.4f}, avg_r2score={:.4f}, avg_mae={:.4f}'.format(test_mse, test_exp_variance, test_r2, test_mae))
     print('--------------------------------------------------------------')
 
     return test_exp_variance
