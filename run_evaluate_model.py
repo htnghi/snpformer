@@ -196,7 +196,7 @@ def evaluate_result_regular(datapath, model_name, X_train, src_vocab_size, y_tra
         model = CNN_Transformer_Allchr(device, src_vocab_size, max_seq_lens, tuning_params=best_params).to(device)
     elif model_name == 'Test1_Transformer':
         print('Evaluate Performance: {}'.format(model_name))
-        max_seq_lens = best_params['max_seq_len']
+        max_seq_lens = int(512)
         model = Transformer_Allchr(device, src_vocab_size, max_len, max_seq_lens, tuning_params=best_params).to(device)
     elif model_name == 'Test2_Infinite_Transformer':
         print('Evaluate Performance: {}'.format(model_name))
