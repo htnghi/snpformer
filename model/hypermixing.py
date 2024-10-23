@@ -22,9 +22,11 @@ class HyperMixing(nn.Module):
     """
 
     def __init__(
-        self,
+        self, 
         input_output_dim: int,
         hypernet_size: int,
+        dropout: float,
+        dropout_position: float,
         tied: bool = False,
         num_heads: int = 1,
         max_length: int = 3000,
@@ -53,6 +55,7 @@ class HyperMixing(nn.Module):
             If True, layer normalization is used.
         """
         super().__init__()
+        self.dropout_layer = nn.Dropout(dropout)
         self.input_output_dim = input_output_dim
         self.hypernetwork_bias = hypernetwork_bias
         self.hyper = _HyperNetwork(
@@ -71,7 +74,7 @@ class HyperMixing(nn.Module):
 
         # add pos encoding or a custom token_information function
         if token_information is None:
-            self.token_information = _PositionalEncoding(input_output_dim, max_length)
+            self.token_information = _PositionalEncoding(input_output_dim, max_length, dropout_position)
         else:
             self.token_information = token_information
 
@@ -118,6 +121,7 @@ class HyperMixing(nn.Module):
         query_len = query.size(1)
         key_len = key.size(1)
 
+        
         if value.size(1) != key.size(1):
             raise ValueError("Number of values not equal to number of keys!")
 
@@ -130,14 +134,14 @@ class HyperMixing(nn.Module):
                 torch.logical_not(query_padding_mask).unsqueeze(-1).float()
             )
             query = query * query_float_mask
-
+        
         # add token information (like position) before passing to hypernetwork
         hyp_in = self.token_information(key)
         hyp_out = self.token_information(query)
-
+        
         # [bsize, num_heads, key_len/query_len, hypernet_size // num_heads]
         W1, W2 = self.hyper(hyp_in, hyp_out)
-
+        
         # mask the weights
         if key_padding_mask is not None:
             W1 = W1 * key_float_mask.unsqueeze(1)
@@ -151,13 +155,12 @@ class HyperMixing(nn.Module):
         )  # [bsize * num_heads, input_output_dim // num_heads, key_len]
         W1 = W1.reshape((bsize * self.num_heads, key_len, -1))
         W2 = W2.reshape((bsize * self.num_heads, query_len, -1))
-
         # we stick the token-mixing MLP together manually
-        out = _mlp_pass_from_components(value, W1, W2, self.activation)
-
+        out = _mlp_pass_from_components(value, self.dropout_layer, W1, W2, self.activation)
+        
         # concatenate heads
         out = out.reshape((bsize, self.input_output_dim, query_len))
-
+        
         # transpose back
         out = out.transpose(1, 2)
 
@@ -289,7 +292,7 @@ class _ParallelMLPs(nn.Module):
 
 
 def _mlp_pass_from_components(
-    out, W1: torch.Tensor, W2: torch.Tensor, activation: nn.Module
+    out, dropout, W1: torch.Tensor, W2: torch.Tensor, activation: nn.Module
 ) -> torch.Tensor:
     # we stick the token MLP together manually
 
@@ -305,6 +308,7 @@ def _mlp_pass_from_components(
     out = torch.bmm(out, W1) #(batch_size, sequence_length, hidden_dim)
     out = activation(out)
     out = torch.bmm(out, W2.transpose(1, 2))
+    out = dropout(out)
 
     return out
 
@@ -312,7 +316,7 @@ def _mlp_pass_from_components(
 class _PositionalEncoding(nn.Module):
     """Adds sinoidal position embeddings to the input."""
 
-    def __init__(self, d_model: int, max_seq_len: int) -> None:
+    def __init__(self, d_model: int, max_seq_len: int, dropout: float) -> None:
         super().__init__()
         self.d_model = d_model
         pe = torch.zeros(max_seq_len, d_model)
@@ -324,6 +328,7 @@ class _PositionalEncoding(nn.Module):
                         pos / (10000 ** ((2 * (i + 1)) / d_model))
                     )
         pe = pe.unsqueeze(0)
+        self.dropout = nn.Dropout(dropout)
         self.register_buffer("pe", pe)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -336,7 +341,7 @@ class _PositionalEncoding(nn.Module):
         pe = pe.expand_as(x)
         # print(f"Expanded pe shape: {pe.shape}")
         x = x + pe
-        return x
+        return self.dropout(x)
     
 
 
